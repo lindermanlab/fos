@@ -42,6 +42,7 @@ def downdate_residual(residual, loadings, weight):
                           resize(weight, shape, method=RESIZE_METHOD))
 
 
+@jit
 def _update_one_weight(residual,
                        loadings_k,
                        init_weights_k,
@@ -78,6 +79,7 @@ def _update_one_weight(residual,
                              verbosity=verbosity)
 
 
+@jit
 def _update_one_loading(datapoint,
                         init_loading,
                         weights,
