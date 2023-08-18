@@ -6,12 +6,12 @@ from jax.image import resize
 from tensorflow_probability.substrates import jax as tfp
 from tqdm.auto import trange
 
-from cfos.prox import prox_grad_descent, project_simplex, soft_threshold
+from cfos.prox import prox_grad_descent, prox_grad_descent_python, project_simplex, soft_threshold
 
 tfd = tfp.distributions
 
 RESIZE_METHOD = "linear"
-
+EPS = 1e-8
 
 def compute_mean(data, loadings, weights):
     shape = data.shape[1:]
@@ -21,9 +21,9 @@ def compute_mean(data, loadings, weights):
                              method=RESIZE_METHOD))
 
 
-def compute_loss(data, loadings, weights, emission_noise_scale):
+def compute_loss(data, counts, loadings, weights, emission_noise_scale):
     mean = compute_mean(data, loadings, weights)
-    return -tfd.Normal(mean, emission_noise_scale).log_prob(data).mean()
+    return -tfd.Normal(mean, jnp.sqrt(emission_noise_scale**2 / counts) + EPS).log_prob(data).mean()
 
 
 def compute_residual(data, loadings, weights):
@@ -44,6 +44,7 @@ def downdate_residual(residual, loadings, weight):
 
 @jit
 def _update_one_weight(residual,
+                       counts,
                        loadings_k,
                        init_weights_k,
                        emission_noise_scale=0.5,
@@ -61,10 +62,10 @@ def _update_one_weight(residual,
 
     @jit
     def objective(w):
-        mu = jnp.einsum('m, ...->m...', loadings_k,
-                        resize(w, shp,
-                               method=RESIZE_METHOD))
-        return -tfd.Normal(mu, emission_noise_scale).log_prob(residual).sum() / scale
+        mu = jnp.einsum('m, ...->m...', loadings_k, resize(w, shp, method=RESIZE_METHOD))
+        dist = tfd.Normal(mu, jnp.sqrt(emission_noise_scale**2 / counts) + EPS)
+        lp = dist.log_prob(residual)
+        return -jnp.where(counts > 0, lp, 0.0).sum() / scale
 
     # Prox operator is the projection step
     prox = lambda w, stepsize: project_simplex(w)
@@ -81,6 +82,7 @@ def _update_one_weight(residual,
 
 @jit
 def _update_one_loading(datapoint,
+                        counts,
                         init_loading,
                         weights,
                         emission_noise_scale=0.5,
@@ -101,7 +103,10 @@ def _update_one_loading(datapoint,
                         resize(weights,
                                (num_factors,) + datapoint.shape,
                                method=RESIZE_METHOD))
-        return -tfd.Normal(mu, emission_noise_scale).log_prob(datapoint).sum()
+        # return -tfd.Normal(mu, emission_noise_scale).log_prob(datapoint).sum()
+        dist = tfd.Normal(mu, jnp.sqrt(emission_noise_scale**2 / counts) + EPS)
+        lp = dist.log_prob(datapoint)
+        return -jnp.where(counts > 0, lp, 0.0).sum() 
 
     # Prox operator is the soft-thresholding operator
     prox = lambda bm, stepsize: soft_threshold(bm, stepsize / loading_scale)
@@ -164,7 +169,9 @@ def initialize_nnsvd(data, num_factors, downsample_factor):
     return init_loadings, init_weights
 
 
-def fit_batch(data, num_factors,
+def fit_batch(data, 
+              counts,
+              num_factors,
               emission_noise_scale=0.5,
               loading_scale=0.1,
               initialization="nnsvd",
@@ -199,7 +206,7 @@ def fit_batch(data, num_factors,
         raise Exception("invalid initialization method: {}".format(initialization))
 
     # Run coordinate ascent
-    losses = [compute_loss(data, loadings, weights, emission_noise_scale)]
+    losses = [compute_loss(data, counts, loadings, weights, emission_noise_scale)]
     print("initial loss: ", losses[0])
 
     for itr in trange(num_iters):
@@ -207,7 +214,7 @@ def fit_batch(data, num_factors,
         print("Updating loadings")
         for m in trange(num_data):
             loadings = loadings.at[m].set(
-                _update_one_loading(data[m], loadings[m], weights,
+                _update_one_loading(data[m], counts[m], loadings[m], weights,
                                     emission_noise_scale=emission_noise_scale,
                                     loading_scale=loading_scale,
                                     verbosity=verbosity))
@@ -219,13 +226,13 @@ def fit_batch(data, num_factors,
             residual = update_residual(residual, loadings[:, k], weights[k])
             # Solve for best factor based on residual
             weights = weights.at[k].set(
-                _update_one_weight(residual, loadings[:, k], weights[k],
+                _update_one_weight(residual, counts, loadings[:, k], weights[k],
                                    emission_noise_scale=emission_noise_scale,
                                    verbosity=verbosity))
             # "downdate" residual by subtracting contribution of updated factor
             residual = downdate_residual(residual, loadings[:, k], weights[k])
 
-        losses.append(compute_loss(data, loadings, weights, emission_noise_scale))
+        losses.append(compute_loss(data, counts, loadings, weights, emission_noise_scale))
         print("loss: ", losses[-1])
 
     return jnp.stack(losses), loadings, weights

@@ -86,13 +86,15 @@ def prox_grad_descent(objective,
     # Run proximal gradient descent until convergence
     def _step_cond(state):
         _, old_obj, curr_obj, counter = state
-        return (~jnp.isfinite(curr_obj)) | (abs(curr_obj - old_obj) > tol) | (counter >= max_num_steps)
-
+        return (abs(curr_obj - old_obj) > tol) & (counter <= max_num_steps)
+        
     def _step_body(state):
         params, _, curr_obj, counter = state
 
         # Define the condition and body of a while loop for backtracking line search
-        def _backtrack_cond(stepsize):
+        def _backtrack_cond(backtrack_state):
+            stepsize, backtrack_counter = backtrack_state
+
             # Compute generalized gradient
             G = (params - prox(params - stepsize * dg(params), stepsize)) / stepsize
 
@@ -106,21 +108,22 @@ def prox_grad_descent(objective,
                     + 0.5 * stepsize * jnp.sum(G**2)
 
             # Continue to decrease stepsize while objective exceeds lower bound
-            return (new_obj > lower_bound) | (counter >= max_num_steps)
+            return (new_obj > lower_bound) & (backtrack_counter < max_num_steps)
 
-        def _backtrack_body(stepsize):
-            return stepsize * discount
+        def _backtrack_body(backtrack_state):
+            stepsize, backtrack_counter = backtrack_state
+            return stepsize * discount, backtrack_counter + 1
 
         # Run backtracking line search to find stepsize
-        stepsize = lax.while_loop(_backtrack_cond, _backtrack_body, max_stepsize)
-
+        stepsize, _ = lax.while_loop(_backtrack_cond, _backtrack_body, (max_stepsize, 0))
+                
         # Perform update with this stepsize
         G = (params - prox(params - stepsize * dg(params), stepsize)) / stepsize
         new_params = params - stepsize * G
         new_obj = g(new_params)
         return new_params, curr_obj, new_obj, counter + 1
 
-    params, _, _, _ = lax.while_loop(_step_cond, _step_body, (init_params, jnp.inf, jnp.inf, 0))
+    params, _, _, _ = lax.while_loop(_step_cond, _step_body, (init_params, jnp.inf, 0.0, 0))
     return params
 
 
