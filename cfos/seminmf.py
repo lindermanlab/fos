@@ -22,8 +22,11 @@ def compute_mean(data, loadings, weights):
 
 
 def compute_loss(data, counts, loadings, weights, emission_noise_scale):
+    scale = jnp.sum(counts > 0)
     mean = compute_mean(data, loadings, weights)
-    return -tfd.Normal(mean, jnp.sqrt(emission_noise_scale**2 / counts) + EPS).log_prob(data).mean()
+    dist = tfd.Normal(mean, jnp.sqrt(emission_noise_scale**2 / (counts + EPS)))
+    lp = dist.log_prob(data)
+    return -jnp.where(counts > 0, lp, 0.0).sum() / scale
 
 
 def compute_residual(data, loadings, weights):
@@ -63,7 +66,7 @@ def _update_one_weight(residual,
     @jit
     def objective(w):
         mu = jnp.einsum('m, ...->m...', loadings_k, resize(w, shp, method=RESIZE_METHOD))
-        dist = tfd.Normal(mu, jnp.sqrt(emission_noise_scale**2 / counts) + EPS)
+        dist = tfd.Normal(mu, jnp.sqrt(emission_noise_scale**2 / (counts + EPS)))
         lp = dist.log_prob(residual)
         return -jnp.where(counts > 0, lp, 0.0).sum() / scale
 
@@ -104,7 +107,7 @@ def _update_one_loading(datapoint,
                                (num_factors,) + datapoint.shape,
                                method=RESIZE_METHOD))
         # return -tfd.Normal(mu, emission_noise_scale).log_prob(datapoint).sum()
-        dist = tfd.Normal(mu, jnp.sqrt(emission_noise_scale**2 / counts) + EPS)
+        dist = tfd.Normal(mu, jnp.sqrt(emission_noise_scale**2 / (counts + EPS)))
         lp = dist.log_prob(datapoint)
         return -jnp.where(counts > 0, lp, 0.0).sum() 
 
@@ -119,6 +122,59 @@ def _update_one_loading(datapoint,
                              discount=discount,
                              tol=tol,
                              verbosity=verbosity)
+
+### 
+# Initialization 
+#
+def downsample_data(data, counts, downsample_factor):
+    """Downsample the data, respecting missing entries.
+
+    Args:
+        data: _description_
+        counts: _description_
+        downsample_factor: _description_
+    """
+    shape = data.shape[1:]
+    shape_r = (-1,)
+    for d in shape:
+        shape_r = shape_r + (d // downsample_factor, downsample_factor)
+
+    data_r = data.reshape(shape_r)
+    counts_r = counts.reshape(shape_r)
+
+    # Sum over the downsample axes
+    axes = tuple(2 + 2 * i for i in range(len(shape)))
+    down_data = jnp.nansum(data_r * counts_r, axis=axes)
+    down_counts = jnp.sum(counts_r, axis=axes)
+    down_data /= down_counts
+    return down_data, down_counts
+
+
+def impute_data(data, counts, rank, num_iters=10):
+    """Impute missing data. This is a necsesary preprocessing step for
+    nnsvd initialization.
+
+    Args:
+        data: _description_
+        rank: _description_
+        num_iters: _description_. Defaults to 10.
+    """
+    print("Imputing missing data based on a rank {} SVD".format(rank))
+    shape = data.shape[1:]
+    flat_data = data.reshape(data.shape[0], -1)
+    flat_counts = data.reshape(counts.shape[0], -1)
+
+    # Start by infilling mean
+    mask = flat_counts > 0
+    imputed_data = jnp.where(mask, flat_data, jnp.mean(data[counts > 0]))
+
+    # Iteratively reconstruct with SVD and
+    for itr in trange(num_iters):
+        U, S, VT = jnp.linalg.svd(imputed_data, full_matrices=False)
+        recon = (U[:, :rank] * S[:rank]) @ VT[:rank]
+        imputed_data = jnp.where(mask, flat_data, recon)
+
+    return imputed_data.reshape((-1,) + shape)
 
 
 def initialize_prior(data,
@@ -143,13 +199,21 @@ def initialize_prior(data,
     return init_loadings, init_weights
 
 
-def initialize_nnsvd(data, num_factors, downsample_factor):
+def initialize_nnsvd(data, counts, num_factors, downsample_factor, imputation_rank=20):
     """Initialize the model with an SVD. Project the right singular vectors
     onto the non-negative orthant.
     """
     num_mice = data.shape[0]
     shape = data.shape[1:]
     down_shape = tuple(d // downsample_factor for d in shape)
+
+    # Downsample the data
+    down_shape = tuple(d // downsample_factor for d in shape)
+    downsampled_data, downsampled_counts = downsample_data(data, counts, downsample_factor)
+
+    # Impute missing data if any is missing
+    if jnp.any(downsampled_counts == 0):
+        downsampled_data = impute_data(downsampled_data, downsampled_counts, rank=imputation_rank)
 
     downsampled_data = resize(data, (num_mice,) + down_shape, method=RESIZE_METHOD)
     U, S, VT = jnp.linalg.svd(downsampled_data.reshape(num_mice, -1), full_matrices=False)
@@ -167,7 +231,8 @@ def initialize_nnsvd(data, num_factors, downsample_factor):
     init_loadings = jnp.column_stack(init_loadings)
     init_weights = jnp.stack(init_weights)
     return init_loadings, init_weights
-
+#
+###
 
 def fit_batch(data, 
               counts,
@@ -200,6 +265,7 @@ def fit_batch(data,
                                              key)
     elif initialization == "nnsvd":
         loadings, weights = initialize_nnsvd(data,
+                                             counts,
                                              num_factors,
                                              downsample_factor)
     else:
@@ -208,7 +274,6 @@ def fit_batch(data,
     # Run coordinate ascent
     losses = [compute_loss(data, counts, loadings, weights, emission_noise_scale)]
     print("initial loss: ", losses[0])
-
     for itr in trange(num_iters):
 
         print("Updating loadings")
@@ -218,6 +283,7 @@ def fit_batch(data,
                                     emission_noise_scale=emission_noise_scale,
                                     loading_scale=loading_scale,
                                     verbosity=verbosity))
+            # assert jnp.all(jnp.isfinite(loadings))
 
         print("Updating factors")
         residual = compute_residual(data, loadings, weights)
