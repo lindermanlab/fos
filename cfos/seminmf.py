@@ -21,10 +21,10 @@ def compute_mean(data, loadings, weights):
                              method=RESIZE_METHOD))
 
 
-def compute_loss(data, counts, loadings, weights, emission_noise_scale):
+def compute_loss(data, counts, loadings, weights, emission_noise_var):
     scale = jnp.sum(counts > 0)
     mean = compute_mean(data, loadings, weights)
-    dist = tfd.Normal(mean, jnp.sqrt(emission_noise_scale**2 / (counts + EPS)))
+    dist = tfd.Normal(mean, jnp.sqrt(emission_noise_var / (counts + EPS)))
     lp = dist.log_prob(data)
     return -jnp.where(counts > 0, lp, 0.0).sum() / scale
 
@@ -50,7 +50,7 @@ def _update_one_weight(residual,
                        counts,
                        loadings_k,
                        init_weights_k,
-                       emission_noise_scale=0.5,
+                       emission_noise_var=0.5,
                        max_num_steps=100,
                        max_stepsize=1.0,
                        discount=0.9,
@@ -66,7 +66,7 @@ def _update_one_weight(residual,
     @jit
     def objective(w):
         mu = jnp.einsum('m, ...->m...', loadings_k, resize(w, shp, method=RESIZE_METHOD))
-        dist = tfd.Normal(mu, jnp.sqrt(emission_noise_scale**2 / (counts + EPS)))
+        dist = tfd.Normal(mu, jnp.sqrt(emission_noise_var / (counts + EPS)))
         lp = dist.log_prob(residual)
         return -jnp.where(counts > 0, lp, 0.0).sum() / scale
 
@@ -88,7 +88,7 @@ def _update_one_loading(datapoint,
                         counts,
                         init_loading,
                         weights,
-                        emission_noise_scale=0.5,
+                        emission_noise_var=0.5,
                         loading_scale=0.1,
                         max_num_steps=100,
                         max_stepsize=0.1,
@@ -106,8 +106,8 @@ def _update_one_loading(datapoint,
                         resize(weights,
                                (num_factors,) + datapoint.shape,
                                method=RESIZE_METHOD))
-        # return -tfd.Normal(mu, emission_noise_scale).log_prob(datapoint).sum()
-        dist = tfd.Normal(mu, jnp.sqrt(emission_noise_scale**2 / (counts + EPS)))
+        # return -tfd.Normal(mu, emission_noise_var).log_prob(datapoint).sum()
+        dist = tfd.Normal(mu, jnp.sqrt(emission_noise_var / (counts + EPS)))
         lp = dist.log_prob(datapoint)
         return -jnp.where(counts > 0, lp, 0.0).sum() 
 
@@ -237,7 +237,7 @@ def initialize_nnsvd(data, counts, num_factors, downsample_factor, imputation_ra
 def fit_batch(data, 
               counts,
               num_factors,
-              emission_noise_scale=0.5,
+              emission_noise_var=0.5,
               loading_scale=0.1,
               initialization="nnsvd",
               downsample_factor=4,
@@ -272,7 +272,7 @@ def fit_batch(data,
         raise Exception("invalid initialization method: {}".format(initialization))
 
     # Run coordinate ascent
-    losses = [compute_loss(data, counts, loadings, weights, emission_noise_scale)]
+    losses = [compute_loss(data, counts, loadings, weights, emission_noise_var)]
     print("initial loss: ", losses[0])
     for itr in trange(num_iters):
 
@@ -280,7 +280,7 @@ def fit_batch(data,
         for m in trange(num_data):
             loadings = loadings.at[m].set(
                 _update_one_loading(data[m], counts[m], loadings[m], weights,
-                                    emission_noise_scale=emission_noise_scale,
+                                    emission_noise_var=emission_noise_var,
                                     loading_scale=loading_scale,
                                     verbosity=verbosity))
             # assert jnp.all(jnp.isfinite(loadings))
@@ -293,12 +293,12 @@ def fit_batch(data,
             # Solve for best factor based on residual
             weights = weights.at[k].set(
                 _update_one_weight(residual, counts, loadings[:, k], weights[k],
-                                   emission_noise_scale=emission_noise_scale,
+                                   emission_noise_var=emission_noise_var,
                                    verbosity=verbosity))
             # "downdate" residual by subtracting contribution of updated factor
             residual = downdate_residual(residual, loadings[:, k], weights[k])
 
-        losses.append(compute_loss(data, counts, loadings, weights, emission_noise_scale))
+        losses.append(compute_loss(data, counts, loadings, weights, emission_noise_var))
         print("loss: ", losses[-1])
 
     return jnp.stack(losses), loadings, weights

@@ -70,6 +70,7 @@ def prox_grad_descent(objective,
                       prox,
                       init_params,
                       max_num_steps=100,
+                      max_num_backtrack_steps=100,
                       max_stepsize=1.0,
                       discount=0.9,
                       tol=1e-6,
@@ -108,8 +109,8 @@ def prox_grad_descent(objective,
                     + 0.5 * stepsize * jnp.sum(G**2)
 
             # Continue to decrease stepsize while objective exceeds lower bound
-            return (new_obj > lower_bound) & (backtrack_counter < max_num_steps)
-
+            # return (new_obj > lower_bound) & (backtrack_counter < max_num_steps)
+            return (new_obj > lower_bound) & (backtrack_counter < max_num_backtrack_steps)
         def _backtrack_body(backtrack_state):
             stepsize, backtrack_counter = backtrack_state
             return stepsize * discount, backtrack_counter + 1
