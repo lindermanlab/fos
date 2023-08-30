@@ -16,9 +16,10 @@ OUT_DIREC = "/Users/xaviergonzalez/Desktop/xavier_folders/stanford/linderman/ser
 mouse_files = sorted(os.listdir(NPZ_DATA_DIREC))
 
 NUM_MICE = 168
+DIMS = (89, 95, 80)
 
-counts = np.zeros((NUM_MICE, 89, 95, 80), dtype=int)
-avg_logs = np.zeros((NUM_MICE, 89, 95, 80))
+counts = np.zeros((NUM_MICE,) + DIMS, dtype=int)
+avg_logs = np.zeros((NUM_MICE,) + DIMS)
 idxs = np.zeros(NUM_MICE)
 
 for (i,f) in tqdm(enumerate(mouse_files)):
@@ -43,6 +44,7 @@ print(np.sum(alive_voxels_logs))
 flat_counts_alive = flat_counts[:, alive_voxels]
 flat_logs_alive = flat_avg_logs[:, alive_voxels]
 
+np.save(os.path.join(OUT_DIREC, "dims.npy"), DIMS)
 np.save(os.path.join(OUT_DIREC, "counts.npy"), flat_counts_alive)
 np.save(os.path.join(OUT_DIREC, "avg_logs.npy"), flat_logs_alive)
 np.save(os.path.join(OUT_DIREC, "alive_voxels.npy"), alive_voxels)
