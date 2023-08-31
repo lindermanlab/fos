@@ -56,8 +56,11 @@ def _update_weights(data,
     scale = data.size
     num_factors = init_weights.shape[0]
 
+    sum_over_axes = tuple(range(1, init_weights.ndim))
+
     def objective(log_weights):
-        weights = jnp.exp(log_weights - logsumexp(log_weights, axis=(1, 2), keepdims=True))
+
+        weights = jnp.exp(log_weights - logsumexp(log_weights, axis=sum_over_axes, keepdims=True))
         # TODO: Blur the weights before computing similarity?
         
         # Compute the DPP kernel derived from a multinomial likelihood
@@ -92,7 +95,7 @@ def _update_weights(data,
         lax.scan(train_step, initial_carry, None, length=num_steps)
 
     # Return the updated parameters
-    weights = jnp.exp(log_weights - logsumexp(log_weights, axis=(1, 2), keepdims=True))
+    weights = jnp.exp(log_weights - logsumexp(log_weights, axis=sum_over_axes, keepdims=True))
     return weights, optimizer_state
     
 

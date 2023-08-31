@@ -1,3 +1,12 @@
+# compress_fos_csvs.py
+# this code takes in the 190 .cat files
+# and returns 190 .npz files
+# each .npz files has:
+# * a list of coordinates
+# * a list of average logs
+# * a list of counts (for that voxel)
+
+
 import os
 import numpy as np
 import pandas as pd
