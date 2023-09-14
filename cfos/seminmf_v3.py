@@ -92,7 +92,7 @@ def _update_factors(data,
                     optimizer, 
                     optimizer_state,
                     dpp_prior_scale=1e3,
-                    dirichlet_prior_conc=0.1,
+                    dirichlet_prior_conc=1.0,
                     num_steps=100):
     r""" Update the factors under a diversity-promoting DPP prior.
     """
@@ -103,6 +103,9 @@ def _update_factors(data,
         log_normalizer = logsumexp(log_factors, axis=tuple(range(1, params.ndim+1)), keepdims=True)
         log_factors -= log_normalizer
         factors = jnp.exp(log_factors)
+
+        # Smooth the factors with a minimum of 1e-8
+
         new_params = dataclasses.replace(params, factors=factors)
 
         # NEW: Penalize similarity to the constant factor
@@ -123,17 +126,18 @@ def _update_factors(data,
         
         # OLD
         # Compute the DPP kernel derived from a multinomial likelihood
-        sqrt_factors = jnp.sqrt(factors + EPS)
-        R = jnp.einsum('k...,j...->kj', sqrt_factors, sqrt_factors) 
-        R = 0.5 * (R + R.T) + 1e-4 * jnp.eye(params.num_factors)
+        # sqrt_factors = jnp.sqrt(factors + EPS)
+        # R = jnp.einsum('k...,j...->kj', sqrt_factors, sqrt_factors) 
+        # R = 0.5 * (R + R.T) + 1e-4 * jnp.eye(params.num_factors)
 
         # Compute the log determinant
         # lpri = jnp.linalg.slogdet(R )[1]
-        L = jnp.linalg.cholesky(R)
-        log_prior = dpp_prior_scale * jnp.sum(jnp.log(jnp.diag(L)))
+        # L = jnp.linalg.cholesky(R)
+        # log_prior = dpp_prior_scale * jnp.sum(jnp.log(jnp.diag(L)))
 
+        # ORIGINAL
         # Add the log prob of the factors under a Dirichlet prior
-        # log_prior += (dirichlet_prior_conc - 1.0) * jnp.sum(log_factors)
+        log_prior = (dirichlet_prior_conc - 1.0) * jnp.sum(log_factors)
 
         # Compute the log likelihood
         mu = compute_mean(new_params)
@@ -188,6 +192,55 @@ def _update_loadings(data : Array,
     out = jnp.linalg.solve(J, h)
     row_effect, loadings = out[:, 0], out[:, 1:]
     return dataclasses.replace(params, row_effect=row_effect, loadings=loadings)
+    
+
+def _initialize_loadings_optimizer(init_loadings, init_row_effect, stepsize):
+    optimizer = optax.adam(stepsize)
+    optimizer_state = optimizer.init((init_loadings, init_row_effect))
+    return optimizer, optimizer_state
+
+def _update_loadings_v2(data,
+                        counts,
+                        params,
+                        optimizer, 
+                        optimizer_state,
+                        l1_penalty=1.0,
+                        num_steps=100):
+    r""" Update the factors under a diversity-promoting DPP prior.
+    """
+    # assert init_factors.ndim == 3
+    scale = data.size
+
+    def objective(loadings_and_row_effect):
+        loadings, row_effect = loadings_and_row_effect
+        new_params = dataclasses.replace(params, loadings=loadings, row_effect=row_effect)
+
+        # Laplace prior to encourage sparse loadings
+        log_prior = -l1_penalty * jnp.sum(abs(loadings))
+
+        # Compute the log likelihood
+        mu = compute_mean(new_params)
+        dist = tfd.Normal(mu, jnp.sqrt(new_params.emission_noise_var / (counts + EPS)))
+        ll = dist.log_prob(data)
+        ll = jnp.where(counts > 0, ll, 0.0).sum()
+        return -(log_prior + ll) / scale
+
+    # One step of the algorithm
+    def train_step(carry, args):
+        loadings_and_row_effect, optimizer_state = carry
+        loss, grads = value_and_grad(objective)(loadings_and_row_effect)
+        updates, optimizer_state = optimizer.update(grads, optimizer_state)
+        loadings_and_row_effect = optax.apply_updates(loadings_and_row_effect, updates)
+        return (loadings_and_row_effect, optimizer_state), loss
+
+    # Run the optimizer
+    initial_carry =  ((params.loadings, params.row_effect), optimizer_state)
+    ((loadings, row_effect), optimizer_state), losses = \
+        lax.scan(train_step, initial_carry, None, length=num_steps)
+
+    # Return the updated parameters
+    params = dataclasses.replace(params, loadings=loadings, row_effect=row_effect)
+    return params, optimizer_state
     
 
 def _update_emission_noise_var(residual : Array, 
@@ -306,6 +359,61 @@ def initialize_nnsvd(data, counts, num_factors, imputation_rank=20):
 
     return params
 
+
+def initialize_greedy(data, counts, num_factors):
+    n, shp = data.shape[0], data.shape[1:]
+    ndim = len(shp)
+
+    # Initialize the row and column effects
+    row_effect = data.mean(axis=tuple(range(1, ndim+1)))
+    residual = data - _right_broadcast(row_effect, ndim)
+    col_effect = residual.mean(axis=0)
+    residual -= col_effect
+    
+
+    # Greedily initialize loadings and factors
+    residual = data
+    loadings = []
+    factors = []
+    
+    for k in range(num_factors):
+        # Find the voxel with the highest residual variance
+        weighted_mean = jnp.einsum('nij, nij->ij', residual, counts) / jnp.sum(counts, axis=0)
+        weighted_var = jnp.einsum('nij, nij->ij', (residual - weighted_mean)**2, counts) / jnp.sum(counts, axis=0)
+        idx = jnp.argmax(weighted_var)
+
+        # Use its residual as the loading
+        loading = residual.reshape(n, -1)[:, idx]
+        
+        # Compute the least squares estimate of the factor
+        factor = jnp.einsum('nij,n->ij', residual, loading) / jnp.linalg.norm(loading, 2)**2
+        if factor.mean() < 0: 
+            factor = -factor
+
+        # Clip and rescale
+        factor = jnp.clip(factor, 0.0, jnp.inf)
+        scale = factor.sum()
+        assert scale > 0.0
+        factor /= scale
+        loading *= scale
+        
+        # Append
+        loadings.append(loading)
+        factors.append(factor)
+
+        # Update residual
+        residual -= jnp.einsum('n,ij->nij', loading, factor)
+
+    loadings = jnp.column_stack(loadings)
+    factors = jnp.stack(factors)
+
+
+    # Initialize the emission variance
+    params = SemiNMFParams(loadings, factors, row_effect, col_effect, None)
+    residual = compute_residual(data, params)
+    return _update_emission_noise_var(residual, counts, params)
+
+
 ###
 # Model fitting code
 #
@@ -341,6 +449,12 @@ def fit_batch(data,
         params = initialize_nnsvd(data,
                                   counts,
                                   num_factors)
+        
+    elif initialization == "greedy":
+        params = initialize_greedy(data,
+                                   counts,
+                                   num_factors)
+        
     else:
         raise Exception("invalid initialization method: {}".format(initialization))
 
@@ -348,28 +462,38 @@ def fit_batch(data,
     params = dataclasses.replace(params, emission_noise_var=0.1**2 * jnp.ones(data.shape[1:]))
 
     # Initialize the factors optimizer
-    optimizer, optimizer_state = _initialize_factors_optimizer(params.factors, stepsize)
+    factors_optimizer, factors_optimizer_state = _initialize_factors_optimizer(params.factors, stepsize)
     update_factors = jit(partial(_update_factors, 
-                                 optimizer=optimizer,
+                                 optimizer=factors_optimizer,
                                  dpp_prior_scale=dpp_prior_scale))
+    
+    # Initialize the loadings optimizer
+    loadings_optimizer, loadings_optimizer_state = _initialize_loadings_optimizer(params.loadings, params.row_effect, stepsize)
+    update_loadings = jit(partial(_update_loadings_v2, 
+                                 optimizer=loadings_optimizer))
 
     # Run coordinate ascent
     losses = [compute_loss(data, counts, params)]
     pbar = trange(num_iters)
     for _ in pbar:
         if verbosity > 0: print("Updating loadings")
-        params = _update_loadings(data, counts, params)
+        # params = _update_loadings(data, counts, params)
+        params, loadings_optimizer_state = \
+            update_loadings(data, 
+                            counts, 
+                            params, 
+                            optimizer_state=loadings_optimizer_state)
 
         if verbosity > 0: print("Updating factors")
-        params, optimizer_state = \
+        params, factors_optimizer_state = \
             update_factors(data,
                            counts,
                            params,
-                           optimizer_state=optimizer_state)
+                           optimizer_state=factors_optimizer_state)
         
         # if verbosity > 0: print("Updating emission noise variance")
-        # residual = compute_residual(data, params)
-        # params = _update_emission_noise_var(residual, counts, params)
+        residual = compute_residual(data, params)
+        params = _update_emission_noise_var(residual, counts, params)
 
         losses.append(compute_loss(data, counts, params))
         pbar.set_description("loss: {:.4f}".format(losses[-1]))

@@ -1,11 +1,23 @@
+# compress_fos_csvs.py
+# this code takes in the 190 .cat files
+# and returns 190 .npz files
+# each .npz files has:
+# * a list of coordinates
+# * a list of average logs
+# * a list of counts (for that voxel)
+
+
 import os
 import numpy as np
 import pandas as pd
 
 from tqdm.auto import trange
 
-RAW_DATA_DIREC = "/Volumes/Storage/serotonin/csv"
-NPZ_DATA_DIREC = "/Volumes/Storage/serotonin/npz"
+# RAW_DATA_DIREC = "/Volumes/Storage/serotonin/csv"
+# NPZ_DATA_DIREC = "/Volumes/Storage/serotonin/npz"
+
+RAW_DATA_DIREC = "/Users/xaviergonzalez/Desktop/xavier_folders/stanford/linderman/serotonin/data/cfos"
+NPZ_DATA_DIREC = "/Users/xaviergonzalez/Desktop/xavier_folders/stanford/linderman/serotonin/data/npz"
 
 for mouse in trange(1, 191):
     fname = os.path.join(RAW_DATA_DIREC, "{:03d}_cat_pts.csv".format(mouse))
