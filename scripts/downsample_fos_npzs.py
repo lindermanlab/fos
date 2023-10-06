@@ -1,6 +1,5 @@
 # downsample_fos_npzs.py
 # this downsamples the fos_npz's by a factor
-
 import os
 import numpy as np
 import pandas as pd
@@ -17,6 +16,7 @@ parser.add_argument('--data_direc', type=str, default=NPZ_DATA_DIREC, help='dire
 args = parser.parse_args()
 
 if __name__ == '__main__':
+    NPZ_DATA_DIREC = args.data_direc
     OUT_DIREC = args.data_direc + f"_{args.downsample}"
     if not os.path.exists(OUT_DIREC):
         os.makedirs(OUT_DIREC)

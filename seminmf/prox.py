@@ -173,4 +173,4 @@ def project_simplex(w):
 
 
 def soft_threshold(x, thresh):
-    return x/jnp.abs(x) * jnp.maximum(jnp.abs(x) - thresh, 0)
+    return x/jnp.abs(x) * jnp.maximum(jnp.abs(x) - thresh, 0.0)

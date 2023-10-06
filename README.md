@@ -1,2 +1,3 @@
-# cfos
-Semi-NMF for cFos data
+# SemiNMF: Semi-non-negative matrix factorization
+
+This library contains models for analyzing Fos imaging data.
