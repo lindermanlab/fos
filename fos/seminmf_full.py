@@ -3,16 +3,19 @@ import jax.numpy as jnp
 import jax.random as jr
 import warnings
 
+from functools import partial
+from fastprogress import progress_bar
 from jax import grad, hessian, vmap, lax, jit
 from jax.nn import softplus
 from jaxtyping import Array, Float
+
 from tensorflow_probability.substrates import jax as tfp
-from tqdm.auto import trange
-
-from seminmf.utils import register_pytree_node_dataclass, tree_add, tree_dot
-
 tfd = tfp.distributions
+tfb = tfp.bijectors
 warnings.filterwarnings("ignore")
+
+from fos.prox import soft_threshold
+from fos.utils import register_pytree_node_dataclass, tree_add, tree_dot
 
 
 @register_pytree_node_dataclass
@@ -29,7 +32,7 @@ class SemiNMFParams:
     intensity_row_effects : Float[Array, "num_rows"]
     intensity_col_effects : Float[Array, "num_columns"]
     intensity_variance : Float[Array, "num_columns"]
-    
+
     @property
     def num_factors(self):
         return self.factors.shape[0]
@@ -67,6 +70,7 @@ def penalty(params, sparsity_penalty, elastic_net_frac):
     return loss
 
 
+@partial(jit, static_argnums=(4,))
 def compute_loss(counts : Float[Array, "num_rows num_columns"],
                  intensity : Float[Array, "num_rows num_columns"],
                  mask : Float[Array, "num_rows num_columns"],
@@ -75,7 +79,7 @@ def compute_loss(counts : Float[Array, "num_rows num_columns"],
                  sparsity_penalty : float,
                  elastic_net_frac: float
                  ):
-    loss = smooth_loss(params, counts, intensity, mask, mean_func) 
+    loss = smooth_loss(params, counts, intensity, mask, mean_func)
     loss += penalty(params, sparsity_penalty, elastic_net_frac)
     return loss / counts.size
 
@@ -116,14 +120,14 @@ def backtracking_line_search(counts,
     dg = grad_smooth_loss(params, counts, intensity, mask, mean_func)
     descent_direction = tree_add(new_params, params, -1.0)
     dg_direc = tree_dot(dg, descent_direction)
-    baseline = smooth_loss(params, counts, intensity, mask, mean_func) 
+    baseline = smooth_loss(params, counts, intensity, mask, mean_func)
     baseline += (1 - alpha) * penalty(params, sparsity_penalty, elastic_net_frac)
 
     def cond_fun(stepsize):
         new_params = tree_add(params, descent_direction, stepsize)
-        new_loss = smooth_loss(new_params, counts, intensity, mask, mean_func) 
+        new_loss = smooth_loss(new_params, counts, intensity, mask, mean_func)
         new_loss += penalty(new_params, sparsity_penalty, elastic_net_frac)
-        bound = baseline + alpha * stepsize * dg_direc 
+        bound = baseline + alpha * stepsize * dg_direc
         bound += alpha * penalty(new_params, sparsity_penalty, elastic_net_frac)
         return new_loss > bound
 
@@ -143,7 +147,7 @@ class QuadraticApprox:
     J_counts : Float[Array, "num_rows num_columns"]
     h_counts : Float[Array, "num_rows num_columns"]
     J_intensity : Float[Array, "num_rows num_columns"]
-    h_intensity : Float[Array, "num_rows num_columns"]    
+    h_intensity : Float[Array, "num_rows num_columns"]
 
 
 def compute_quadratic_approx(counts, intensity, mask, params, mean_func):
@@ -164,7 +168,7 @@ def compute_quadratic_approx(counts, intensity, mask, params, mean_func):
 
     # Compute the quadratic approximation for the Poisson loss
     activations = params.count_row_effects[:, None] \
-                + params.count_column_effects \
+                + params.count_col_effects \
                 + jnp.einsum('mk, kn->mn', params.count_loadings, params.factors)
     predictions = f(activations)
     J_counts = mask * (d2g(activations) * (predictions - counts) + (dg(activations))**2 * d2A(g(activations)))
@@ -172,7 +176,7 @@ def compute_quadratic_approx(counts, intensity, mask, params, mean_func):
 
     # Compute the quadratic loss for the intensity
     predictions = params.intensity_row_effects[:, None] \
-                + params.intensity_column_effects \
+                + params.intensity_col_effects \
                 + jnp.einsum('mk, kn->mn', params.intensity_loadings, params.factors)
     J_intensity = mask * counts / params.intensity_variance
     h_intensity = mask * counts / params.intensity_variance * (intensity - predictions)
@@ -218,11 +222,11 @@ def update_loadings(quad_approx,
 
     # Update the intensity loadings
     h_intensity, intensity_loadings = vmap(_update_one_loading)(quad_approx.h_intensity, quad_approx.J_intensity, params.intensity_loadings)
-    params = dataclasses.replace(params, 
+    params = dataclasses.replace(params,
                                  count_loadings=count_loadings,
                                  intensity_loadings=intensity_loadings)
-    
-    quad_approx = dataclasses.replace(quad_approx, 
+
+    quad_approx = dataclasses.replace(quad_approx,
                                       h_counts=h_counts,
                                       h_intensity=h_intensity)
     return quad_approx, params
@@ -264,18 +268,18 @@ def update_factors(quad_approx, params):
 
         # Scan over the (K,) dimension
         (hc_n, hi_n), factor_n = \
-            lax.scan(_update_one_coord, 
-                     (hc_n, hi_n), 
+            lax.scan(_update_one_coord,
+                     (hc_n, hi_n),
                      (factor_n, params.count_loadings.T, params.intensity_loadings.T))
-        
+
         return hc_n, hi_n, factor_n
 
     # Map over the (N,) dimension
     h_countsT, h_intensityT, factorsT = \
-        vmap(_update_one_column)(quad_approx.h_counts.T, 
-                                 quad_approx.J_counts.T, 
-                                 quad_approx.h_intensity.T, 
-                                 quad_approx.J_intensity.T, 
+        vmap(_update_one_column)(quad_approx.h_counts.T,
+                                 quad_approx.J_counts.T,
+                                 quad_approx.h_intensity.T,
+                                 quad_approx.J_intensity.T,
                                  params.factors.T)
     h_counts = h_countsT.T
     h_intensity = h_intensityT.T
@@ -286,8 +290,8 @@ def update_factors(quad_approx, params):
     factors /= scale[:, None]
     count_loadings = params.count_loadings * scale
     intensity_loadings = params.intensity_loadings * scale
-    params = dataclasses.replace(params, 
-                                 factors=factors, 
+    params = dataclasses.replace(params,
+                                 factors=factors,
                                  count_loadings=count_loadings,
                                  intensity_loadings=intensity_loadings)
     quad_approx = dataclasses.replace(quad_approx, h_counts=h_counts, h_intensity=h_intensity)
@@ -321,10 +325,10 @@ def update_row_effect(quad_approx, params):
     h_intensity, intensity_row_effects = \
         vmap(_update_one_row)(quad_approx.h_intensity, quad_approx.J_intensity, params.intensity_row_effects)
 
-    params = dataclasses.replace(params, 
+    params = dataclasses.replace(params,
                                  count_row_effects=count_row_effects,
                                  intensity_row_effects=intensity_row_effects)
-    quad_approx = dataclasses.replace(quad_approx, 
+    quad_approx = dataclasses.replace(quad_approx,
                                       h_counts=h_counts,
                                       h_intensity=h_intensity)
     return quad_approx, params
@@ -351,15 +355,15 @@ def update_column_effect(quad_approx, params):
 
     # Update the column effects for the counts
     h_intensityT, count_col_effects = \
-        vmap(_update_one_column)(quad_approx.h_counts.T, 
-                                 quad_approx.J_counts.T, 
+        vmap(_update_one_column)(quad_approx.h_counts.T,
+                                 quad_approx.J_counts.T,
                                  params.count_col_effects)
     h_counts = h_intensityT.T
 
     # Do the same for the intensity
     h_intensityT, intensity_col_effects = \
-        vmap(_update_one_column)(quad_approx.h_intensity.T, 
-                                 quad_approx.J_intensity.T, 
+        vmap(_update_one_column)(quad_approx.h_intensity.T,
+                                 quad_approx.J_intensity.T,
                                  params.intensity_col_effects)
     h_intensity = h_intensityT.T
 
@@ -371,15 +375,35 @@ def update_column_effect(quad_approx, params):
     intensity_col_effects -= mean
     intensity_row_effects = params.intensity_row_effects + mean
 
-    params = dataclasses.replace(params, 
-                                 count_row_effects=count_row_effects, 
+    params = dataclasses.replace(params,
+                                 count_row_effects=count_row_effects,
                                  count_col_effects=count_col_effects,
-                                 intensity_row_effects=intensity_row_effects, 
+                                 intensity_row_effects=intensity_row_effects,
                                  intensity_col_effects=intensity_col_effects)
-    quad_approx = dataclasses.replace(quad_approx, 
-                                      h_counts=h_counts, 
+    quad_approx = dataclasses.replace(quad_approx,
+                                      h_counts=h_counts,
                                       h_intensity=h_intensity)
     return quad_approx, params
+
+
+def update_emission_noise_var(counts, 
+                              intensity,
+                              mask,
+                              params,
+                              alpha=0.0001, 
+                              beta=0.0001):
+    """Update the emission noise variance via coordinate ascent.
+    """
+    # Compute the quadratic loss for the intensity
+    predictions = params.intensity_row_effects[:, None] \
+                + params.intensity_col_effects \
+                + jnp.einsum('mk, kn->mn', params.intensity_loadings, params.factors)
+    residual = intensity - predictions
+
+    alpha_post = alpha + 0.5 * jnp.sum((mask * counts) > 0, axis=0)
+    beta_post = beta + 0.5 * jnp.sum(mask * counts * residual**2, axis=0)
+    intensity_variance = beta_post / alpha_post
+    return dataclasses.replace(params, intensity_variance=intensity_variance)
 
 
 def initialize_random(key, data, num_factors, mean_func):
@@ -409,9 +433,9 @@ def initialize_nnsvd(counts, intensity, num_factors, mean_func, drugs=None):
     """
     # Convert data to "targets" by inverting mean function
     if mean_func.lower() == "softplus":
-        counts = jnp.maximum(counts, 1e-1)
+        pseudocounts = jnp.maximum(counts, 1e-1)
         # y = log(1 + e^{x})  ->  x = log(e^y - 1) = y + log(1 - e^{-y})
-        targets = counts + jnp.log(1 - jnp.exp(-counts))
+        targets = pseudocounts + jnp.log(1 - jnp.exp(-pseudocounts))
     else:
         raise Exception("Invalid mean function: {}".format(mean_func))
 
@@ -447,19 +471,28 @@ def initialize_nnsvd(counts, intensity, num_factors, mean_func, drugs=None):
     factors = jnp.stack(factors)
 
     # Now compute intensity loadings using factors from the counts
-    targets = intensity
-    intensity_row_effect = jnp.mean(intensity, axis=1)
+    targets = jnp.where(counts > 0, intensity, 0.0)
+    intensity_row_effect = jnp.sum(counts * targets, axis=1) / jnp.sum(counts, axis=1)
     targets -= intensity_row_effect[:, None]
     if drugs is not None:
         # !!!!HACK!!!!! Leaking information about drugs into column effect
-        intensity_col_effect = targets[drugs == 10].mean(axis=0)
+        # intensity_col_effect = targets[drugs == 10].mean(axis=0)
+        pass
     else:
-        intensity_col_effect = targets.mean(axis=0)
+        intensity_col_effect = jnp.sum(counts * targets, axis=0) / jnp.sum(counts, axis=0)
     targets -= intensity_col_effect
 
     # Solve for the intensity loading with a simple linear regression
     # y_m ~ \theta^T @ \beta_m -> \beta_m* = (\theta \theta^T)^{-1} \theta y_m
-    intensity_loadings = jnp.linalg.solve(factors @ factors.T, factors @ targets.T).T
+    # intensity_loadings = jnp.linalg.solve(factors @ factors.T, factors @ targets.T).T
+    intensity_loadings = jnp.linalg.solve(
+        jnp.einsum('mn, jn, kn->mjk', counts, factors, factors),
+        jnp.einsum('mn, mn, kn->mk', counts, targets, factors))
+    # intensity_loadings = jnp.einsum('mn,mn,kn->mk', counts, targets, factors) / jnp.einsum('mn, kn, kn->mk', counts, factors, factors)
+    assert jnp.all(jnp.isfinite(intensity_loadings))
+
+    # TODO: Compute the intensity variance
+    intensity_variance = 1.0 * jnp.ones(shape)
 
     return SemiNMFParams(factors,
                          count_loadings,
@@ -467,59 +500,9 @@ def initialize_nnsvd(counts, intensity, num_factors, mean_func, drugs=None):
                          count_col_effect,
                          intensity_loadings,
                          intensity_row_effect,
-                         intensity_col_effect)
+                         intensity_col_effect,
+                         intensity_variance)
 
-
-def initialize_greedy(data, num_factors, mean_func, drugs=None):
-    # Convert data to "targets" by inverting mean function
-    if mean_func.lower() == "softplus":
-        data = jnp.maximum(data, 1e-1)
-        targets = data + jnp.log(1 - jnp.exp(-data))
-    else:
-        raise Exception("Invalid mean function: {}".format(mean_func))
-
-    # Initialize the row and column effects
-    row_effects = targets.mean(axis=1)
-    residual = targets - row_effects[:, None]
-
-    # !!!!HACK!!!!!
-    # Leaking information about drugs into column effect
-    col_effect = targets[drugs == 10].mean(axis=0)
-    residual -= col_effect
-
-    # Greedily initialize loadings and factors
-    loadings = []
-    factors = []
-
-    for k in range(num_factors):
-        # Find the voxel with the highest residual variance
-        idx = jnp.argmax(jnp.var(residual, axis=0))
-
-        # Use its residual as the loading
-        loading = residual[:, idx]
-
-        # Compute the least squares estimate of the factor
-        factor = jnp.einsum('mn,m->n', residual, loading) / jnp.linalg.norm(loading, 2)**2
-        if factor.mean() < 0:
-            factor = -factor
-
-        # Clip and rescale
-        factor = jnp.maximum(factor, 0.0)
-        scale = factor.sum()
-        assert scale > 0.0
-        factor /= scale
-        loading *= scale
-
-        # Append
-        loadings.append(loading)
-        factors.append(factor)
-
-        # Update residual
-        residual -= jnp.einsum('m,n->mn', loading, factor)
-
-    loadings = jnp.column_stack(loadings)
-    factors = jnp.stack(factors)
-    return SemiNMFParams(loadings, factors, row_effects, col_effect)
 
 
 def fit_poisson_seminmf(counts,
@@ -563,6 +546,9 @@ def fit_poisson_seminmf(counts,
         (_, new_params), _ = lax.scan(_column_step, (quad_approx, params), None, length=num_coord_ascent_iters)
         params = backtracking_line_search(counts, intensity, mask, params, new_params, mean_func, sparsity_penalty, elastic_net_frac)
 
+        # Update variance
+        params = update_emission_noise_var(counts, intensity, mask, params)
+        
         loss = compute_loss(counts, intensity, mask, params, mean_func, sparsity_penalty, elastic_net_frac)
         hll = heldout_loglike(counts, intensity, mask, params, mean_func)
         return params, loss, hll
@@ -571,13 +557,15 @@ def fit_poisson_seminmf(counts,
     params = initial_params
     losses = [compute_loss(counts, intensity, mask, params, mean_func, sparsity_penalty, elastic_net_frac)]
     hlls = [heldout_loglike(counts, intensity, mask, params, mean_func)]
-    pbar = trange(num_iters)
+    pbar = progress_bar(range(num_iters))
+#     breakpoint()
     for itr in pbar:
         params, loss, hll = _step(params, itr)
         losses.append(loss)
         hlls.append(hll)
         assert jnp.isfinite(loss)
-        pbar.set_description("loss: {:.4f}".format(losses[-1]))
+#         print("loss: {:.4f}".format(losses[-1]))
+        pbar.comment = "loss: {:.4f}".format(losses[-1])
 
         if abs(losses[-1] - losses[-2]) < tolerance:
             break
