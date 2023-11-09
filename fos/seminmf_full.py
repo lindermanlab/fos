@@ -138,7 +138,7 @@ def backtracking_line_search(counts,
         return beta * stepsize, itr + 1
 
     init_state = (1.0, 0)
-    stepsize = lax.while_loop(cond_fun, body_fun, init_state)
+    (stepsize, _) = lax.while_loop(cond_fun, body_fun, init_state)
     return tree_add(params, descent_direction, stepsize)
 
 
