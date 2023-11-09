@@ -115,7 +115,8 @@ def backtracking_line_search(counts,
                              sparsity_penalty,
                              elastic_net_frac,
                              alpha=0.5,
-                             beta=0.5):
+                             beta=0.5,
+                             max_iters=20):
     # Precompute some constants
     dg = grad_smooth_loss(params, counts, intensity, mask, mean_func)
     descent_direction = tree_add(new_params, params, -1.0)
@@ -123,18 +124,21 @@ def backtracking_line_search(counts,
     baseline = smooth_loss(params, counts, intensity, mask, mean_func)
     baseline += (1 - alpha) * penalty(params, sparsity_penalty, elastic_net_frac)
 
-    def cond_fun(stepsize):
+    def cond_fun(state):
+        stepsize, itr = state
         new_params = tree_add(params, descent_direction, stepsize)
         new_loss = smooth_loss(new_params, counts, intensity, mask, mean_func)
         new_loss += penalty(new_params, sparsity_penalty, elastic_net_frac)
         bound = baseline + alpha * stepsize * dg_direc
         bound += alpha * penalty(new_params, sparsity_penalty, elastic_net_frac)
-        return new_loss > bound
+        return (new_loss > bound) & (itr < max_iters)
 
-    def body_fun(stepsize):
-        return beta * stepsize
+    def body_fun(state):
+        stepsize, itr = state
+        return beta * stepsize, itr + 1
 
-    stepsize = lax.while_loop(cond_fun, body_fun, 1.0)
+    init_state = (1.0, 0)
+    stepsize = lax.while_loop(cond_fun, body_fun, init_state)
     return tree_add(params, descent_direction, stepsize)
 
 
