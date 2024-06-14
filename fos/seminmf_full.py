@@ -522,7 +522,7 @@ def fit_poisson_seminmf(counts,
                         ):
 
     # Make mask if necessary
-    mask = jnp.ones_like(counts) if mask is None else mask
+    mask = jnp.ones_like(counts, dtype=bool) if mask is None else mask
     assert mask.shape == counts.shape
 
     @jit
