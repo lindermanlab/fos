@@ -63,7 +63,7 @@ def run_sweep(data_file,
               wandb_project):
     
     # Load the data
-    intensity, counts, alive_voxels = load_data(data_file, left_trunc)
+    intensity, counts, _ = load_data(data_file, left_trunc)
     num_mice, num_alive_voxels = counts.shape
 
     # Run bootstrap 
@@ -148,6 +148,13 @@ def run_sweep(data_file,
 
         # Log results to wandb
         wandb.finish()
+
+        # Cleanup
+        del params
+        del factors
+        del bootstrap_inds
+        del bootstrap_counts
+        del bootstrap_intensity
     
 
 if __name__ == '__main__':
