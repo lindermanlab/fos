@@ -13,13 +13,13 @@ from fos import seminmf_full as seminmf
 
 warnings.filterwarnings("ignore")
 
-def load_data(data_file, left_trunc):
+def load_data(data_dir, left_trunc):
     """Load the combined data
      
     Note: files are permanently available on [Google Drive](https://drive.google.com/drive/u/0/folders/1xD54Uq4cKJsACmy8KVZZZ5YGCjF6ZrkC). 
     The scratch storage may be deleted periodically by Sherlock.
     """
-    data = np.load(data_file)
+    data = np.load(os.path.join(data_dir, "downsampled_data_4.npz"))
     intensity_3d = data["intensity"][:-1]
     counts_3d = data["counts"][:-1]
     num_mice = counts_3d.shape[0]
@@ -35,11 +35,28 @@ def load_data(data_file, left_trunc):
     intensity = intensity_3d[:, alive_voxels]
     counts = counts_3d[:, alive_voxels]
     intensity[counts == 0] = 0.0
-    return intensity, counts, alive_voxels
 
+    # Load the drug ids ((M,) array of ints)
+    drugs = np.load(os.path.join(data_dir, "drug_ids.npy"))
+
+    return intensity, counts, alive_voxels, drugs
+
+def bootstrap(key, groups):
+    """Generate a bootstrap sample of the indices, preserving the group sizes.
+    """
+    group_ids = jnp.unique(groups)
+    keys = jr.split(key, len(group_ids))
+
+    indices = []
+    for group_id, k in zip(group_ids, keys):
+        mouse_ids = jnp.where(groups == group_id)[0]
+        indices.append(jr.choice(k, mouse_ids, shape=(len(mouse_ids),), replace=True))
+
+    return jnp.concatenate(indices)
+    
 
 @click.command()
-@click.option('--data_file', default="/scratch/groups/swl1/serotonin/npz_4/downsampled_data_4.npz", help='path to data file (at 100um resolution).')
+@click.option('--data_dir', default="/home/groups/swl1/swl1/serotonin/", help='path to data file (at 100um resolution).')
 @click.option('--results_dir', default="/home/groups/swl1/swl1/fos/results/2024_05_30-21_19-bootstrap", help='path to folder where results are stored.')
 @click.option('--left_trunc', default=8, help='number of voxels to drop on the left side of the brain')
 @click.option('--num_factors', default=14, help='number of factors.')
@@ -50,7 +67,7 @@ def load_data(data_file, left_trunc):
 @click.option('--num_coord_ascent_iters', default=1, help='number of inner iterations of coordinate ascent')
 @click.option('--num_bootstrap', default=1000, help='number of bootstrap iterations')
 @click.option('--wandb_project', default="serotonin-fos-seminmf-bootstrap", help='wandb project name')
-def run_sweep(data_file, 
+def run_sweep(data_dir, 
               results_dir, 
               left_trunc, 
               num_factors, 
@@ -63,7 +80,7 @@ def run_sweep(data_file,
               wandb_project):
     
     # Load the data
-    intensity, counts, _ = load_data(data_file, left_trunc)
+    intensity, counts, alive_voxels, drugs = load_data(data_dir, left_trunc)
     num_mice, num_alive_voxels = counts.shape
 
     # Run bootstrap 
@@ -75,7 +92,8 @@ def run_sweep(data_file,
             
         # Create a bootstrapped dataset
         key = jr.PRNGKey(i)
-        bootstrap_inds = jr.choice(key, num_mice, shape=(num_mice,), replace=True)
+        # bootstrap_inds = jr.choice(key, num_mice, shape=(num_mice,), replace=True)
+        bootstrap_inds = bootstrap(key, drugs)
         bootstrap_counts = counts[bootstrap_inds]
         bootstrap_intensity = intensity[bootstrap_inds]
         
@@ -98,8 +116,7 @@ def run_sweep(data_file,
                 num_coord_ascent_iters=num_coord_ascent_iters,
                 mean_func=mean_func,
                 initialization="nnsvd",
-                data_file=data_file,
-                drug_file="",
+                data_dir=data_dir,
                 left_trunc=left_trunc)
             )
         
