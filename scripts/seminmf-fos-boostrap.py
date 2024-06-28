@@ -150,11 +150,14 @@ def run_sweep(data_file,
         wandb.finish()
 
         # Cleanup
+        del initial_params
         del params
         del factors
+        del bootstrap_alive_voxels
         del bootstrap_inds
         del bootstrap_counts
         del bootstrap_intensity
+        del run
     
 
 if __name__ == '__main__':
