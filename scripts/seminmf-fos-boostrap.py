@@ -172,6 +172,8 @@ def run_sweep(data_dir,
         del bootstrap_inds
         del bootstrap_counts
         del bootstrap_intensity
+        del run
+        del artifact
     
 
 if __name__ == '__main__':
