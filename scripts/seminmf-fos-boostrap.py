@@ -167,8 +167,10 @@ def run_sweep(data_dir,
         wandb.finish()
 
         # Cleanup
+        del initial_params
         del params
         del factors
+        del bootstrap_alive_voxels
         del bootstrap_inds
         del bootstrap_counts
         del bootstrap_intensity
