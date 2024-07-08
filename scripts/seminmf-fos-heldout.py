@@ -7,7 +7,6 @@ import pickle
 import jax.numpy as jnp
 import jax.random as jr
 import wandb
-from fastprogress import progress_bar
 
 from fos import seminmf_full as seminmf
 

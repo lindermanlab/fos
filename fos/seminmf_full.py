@@ -142,6 +142,48 @@ def backtracking_line_search(counts,
     return tree_add(params, descent_direction, stepsize)
 
 
+# def backtracking_line_search_scan(counts,
+#                              intensity,
+#                              mask,
+#                              params,
+#                              new_params,
+#                              mean_func,
+#                              sparsity_penalty,
+#                              elastic_net_frac,
+#                              alpha=0.5,
+#                              beta=0.5,
+#                              max_iters=20):
+#     # Precompute some constants
+#     dg = grad_smooth_loss(params, counts, intensity, mask, mean_func)
+#     descent_direction = tree_add(new_params, params, -1.0)
+#     dg_direc = tree_dot(dg, descent_direction)
+#     baseline = smooth_loss(params, counts, intensity, mask, mean_func)
+#     baseline += (1 - alpha) * penalty(params, sparsity_penalty, elastic_net_frac)
+
+#     def _step(carry, stepsize):
+#         prev_params, prev_criterion_met = carry
+
+#         # Compute new params and check if loss is less than upper bound
+#         new_params = tree_add(params, descent_direction, stepsize)
+#         new_loss = smooth_loss(new_params, counts, intensity, mask, mean_func)
+#         new_loss += penalty(new_params, sparsity_penalty, elastic_net_frac)
+#         bound = baseline + alpha * stepsize * dg_direc
+#         bound += alpha * penalty(new_params, sparsity_penalty, elastic_net_frac)
+#         new_criterion_met = new_loss < bound
+
+#         # If criterion not met on previous iteration, return these params
+#         new_carry = lax.cond(
+#             prev_criterion_met,
+#             lambda: prev_params, prev_criterion_met,
+#             lambda: new_params, new_criterion_met)
+
+#         return new_carry, None
+
+#     stepsizes = beta ** jnp.arange(max_iters)
+#     (new_params, criterion_met), _ = lax.scan(_step, (params, False), stepsizes)
+#     return new_params
+
+
 @register_pytree_node_dataclass
 @dataclasses.dataclass(frozen=True)
 class QuadraticApprox:
@@ -508,6 +550,54 @@ def initialize_nnsvd(counts, intensity, num_factors, mean_func, drugs=None):
                          intensity_variance)
 
 
+def initialize_prediction(counts, 
+                          intensity, 
+                          initial_params, 
+                          mean_func):
+    """Initialize the row factors for prediction tasks.
+    """
+    num_mice, num_voxels = counts.shape
+
+    # Convert data to "targets" by inverting mean function
+    if mean_func.lower() == "softplus":
+        pseudocounts = jnp.maximum(counts, 1e-1)
+        # y = log(1 + e^{x})  ->  x = log(e^y - 1) = y + log(1 - e^{-y})
+        targets = pseudocounts + jnp.log(1 - jnp.exp(-pseudocounts))
+    else:
+        raise Exception("Invalid mean function: {}".format(mean_func))
+    
+    # Initialize the row- and column-effects
+    targets -= initial_params.count_col_effects
+
+    # Solve for count loadings using a simple regression
+    factors = initial_params.factors
+    padded_factors = jnp.column_stack(jnp.ones(num_voxels), factors)
+    count_loadings = jnp.linalg.solve(
+        jnp.einsum('jn, kn->jk', padded_factors, padded_factors),
+        jnp.einsum('mn, kn->k', targets, padded_factors))
+    assert jnp.all(jnp.isfinite(count_loadings))
+
+    count_row_effects = count_loadings[:,0]
+    count_loadings = count_loadings[:,1:]
+
+    # Solve for the intensity loading with a weighted linear regression,
+    # using the counts / variance
+    targets = intensity - initial_params.intensity_col_effects
+    weights = counts / initial_params.intensity_variance
+    intensity_loadings = jnp.linalg.solve(
+        jnp.einsum('mn, jn, kn->mjk', weights, padded_factors, padded_factors),
+        jnp.einsum('mn, mn, kn->mk', weights, targets, padded_factors))
+    assert jnp.all(jnp.isfinite(intensity_loadings))
+
+    intensity_row_effects = intensity_loadings[:,0]
+    intensity_loadings = intensity_loadings[:,1:]
+
+    return dataclasses.replace(initial_params,
+                               count_row_effects=count_row_effects,
+                               count_loadings=count_loadings,
+                               intensity_row_effects=intensity_row_effects,
+                               intensity_loadings=intensity_loadings)
+
 
 def fit_poisson_seminmf(counts,
                         intensity,
@@ -562,13 +652,68 @@ def fit_poisson_seminmf(counts,
     losses = [compute_loss(counts, intensity, mask, params, mean_func, sparsity_penalty, elastic_net_frac)]
     hlls = [heldout_loglike(counts, intensity, mask, params, mean_func)]
     pbar = progress_bar(range(num_iters))
-#     breakpoint()
     for itr in pbar:
         params, loss, hll = _step(params, itr)
         losses.append(loss)
         hlls.append(hll)
         assert jnp.isfinite(loss)
-#         print("loss: {:.4f}".format(losses[-1]))
+        pbar.comment = "loss: {:.4f}".format(losses[-1])
+
+        if abs(losses[-1] - losses[-2]) < tolerance:
+            break
+
+    return params, jnp.stack(losses), jnp.stack(hlls)
+
+
+def predict_poisson_seminmf(counts,
+                            intensity,
+                            params,
+                            mean_func="softplus",
+                            num_iters=10,
+                            sparsity_penalty=1.0,
+                            elastic_net_frac=0.0,
+                            num_coord_ascent_iters=20,
+                            tolerance=1e-1,
+                            ):
+    """
+    Predict the loadings (row factors) given data and (column) factors.
+    """
+
+    # Make mask if necessary
+    mask = jnp.ones_like(counts, dtype=bool) if mask is None else mask
+    assert mask.shape == counts.shape
+
+    # Initialize row parameters
+    params = initialize_prediction(counts, intensity, params, mean_func)
+
+    @jit
+    def _step(params, _):
+        """
+        One sweep over parameter updates
+        """
+        # Update rows
+        quad_approx = compute_quadratic_approx(counts, intensity, mask, params, mean_func)
+        def _row_step(carry, _):
+            quad_approx, params = carry
+            quad_approx, params = update_loadings(quad_approx, params, sparsity_penalty, elastic_net_frac)
+            quad_approx, params = update_row_effect(quad_approx, params)
+            return (quad_approx, params), None
+        (quad_approx, new_params), _ = lax.scan(_row_step, (quad_approx, params), None, length=num_coord_ascent_iters)
+        params = backtracking_line_search(counts, intensity, mask, params, new_params, mean_func, sparsity_penalty, elastic_net_frac)
+
+        loss = compute_loss(counts, intensity, mask, params, mean_func, sparsity_penalty, elastic_net_frac)
+        hll = heldout_loglike(counts, intensity, mask, params, mean_func)
+        return params, loss, hll
+
+    # Run coordinate ascent
+    losses = [compute_loss(counts, intensity, mask, params, mean_func, sparsity_penalty, elastic_net_frac)]
+    hlls = [heldout_loglike(counts, intensity, mask, params, mean_func)]
+    pbar = progress_bar(range(num_iters))
+    for itr in pbar:
+        params, loss, hll = _step(params, itr)
+        losses.append(loss)
+        hlls.append(hll)
+        assert jnp.isfinite(loss)
         pbar.comment = "loss: {:.4f}".format(losses[-1])
 
         if abs(losses[-1] - losses[-2]) < tolerance:
