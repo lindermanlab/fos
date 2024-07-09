@@ -77,7 +77,7 @@ def run_sweep(data_dir,
     mask = jnp.zeros(num_mice, dtype=bool)
     mask = mask.at[test_inds].set(True)
 
-    result_file = os.path.join(results_dir, f"params_train.pkl")
+    result_file = os.path.join(results_dir, f"params_train_{seed:04d}.pkl")
     if os.path.exists(result_file):
         return
         
@@ -94,6 +94,7 @@ def run_sweep(data_dir,
         project=wandb_project,
         job_type="train",
         config=dict(
+            seed=seed,
             mask=mask,
             sparsity_penalty=sparsity_penalty,
             num_factors=num_factors,
@@ -137,10 +138,17 @@ def run_sweep(data_dir,
     # Save the results for this bootstrap
     print("saving results")
     with open(result_file, 'wb') as f:
-        pickle.dump(dict(mask=mask,
+        pickle.dump(dict(seed=seed,
+                         mask=mask,
                          factors=factors,
                          count_loadings=params.count_loadings, 
-                         intensity_loadings=params.intensity_loadings),
+                         count_row_effects=params.count_row_effects,
+                         count_col_effecs=params.count_col_effects,
+                         intensity_loadings=params.intensity_loadings,
+                         intensity_row_effects=params.intensity_row_effects,
+                         intensity_col_effecs=params.intensity_col_effects,
+                         intensity_variance=params.intensity_variance,
+                         ),
                     f)
 
     artifact = wandb.Artifact(name="params_pkl", type="model")

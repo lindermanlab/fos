@@ -571,10 +571,10 @@ def initialize_prediction(counts,
 
     # Solve for count loadings using a simple regression
     factors = initial_params.factors
-    padded_factors = jnp.column_stack(jnp.ones(num_voxels), factors)
+    padded_factors = jnp.row_stack((jnp.ones(num_voxels), factors))
     count_loadings = jnp.linalg.solve(
         jnp.einsum('jn, kn->jk', padded_factors, padded_factors),
-        jnp.einsum('mn, kn->k', targets, padded_factors))
+        jnp.einsum('mn, kn->km', targets, padded_factors)).T
     assert jnp.all(jnp.isfinite(count_loadings))
 
     count_row_effects = count_loadings[:,0]
@@ -582,11 +582,17 @@ def initialize_prediction(counts,
 
     # Solve for the intensity loading with a weighted linear regression,
     # using the counts / variance
+    # y_{m,n} ~ N(\beta_m^T \theta_k, \sigma_{m,n}^2)
+    # L(\beta_m) = -1/2 \sum_n 1/\sigma_{m,n}^2 (y_{m,n} - \beta_m^T\theta_k)^2 
+    #            = -1/2 \beta_m^T J_m \beta_m + \beta_m^\top h_m
+    # J_m = \sum_n 1/\sigma_{m,n}^2 \theta_{k,n} \theta_{k,n}^T
+    # h_m = \sum_n 1/\sigma_{m,n}^2 y_{m,n} \theta_{k,n}
+    # -> \beta_m* = J_m^{-1} h_m
     targets = intensity - initial_params.intensity_col_effects
     weights = counts / initial_params.intensity_variance
-    intensity_loadings = jnp.linalg.solve(
-        jnp.einsum('mn, jn, kn->mjk', weights, padded_factors, padded_factors),
-        jnp.einsum('mn, mn, kn->mk', weights, targets, padded_factors))
+    Js = jnp.einsum('mn, jn, kn->mjk', weights, padded_factors, padded_factors)
+    hs = jnp.einsum('mn, mn, kn->mk', weights, jnp.where(counts > 0, targets, 0.0), padded_factors)
+    intensity_loadings = jnp.linalg.solve(Js, hs[:,:,None])[:,:,0]
     assert jnp.all(jnp.isfinite(intensity_loadings))
 
     intensity_row_effects = intensity_loadings[:,0]
@@ -678,13 +684,9 @@ def predict_poisson_seminmf(counts,
     """
     Predict the loadings (row factors) given data and (column) factors.
     """
-
-    # Make mask if necessary
-    mask = jnp.ones_like(counts, dtype=bool) if mask is None else mask
-    assert mask.shape == counts.shape
-
     # Initialize row parameters
     params = initialize_prediction(counts, intensity, params, mean_func)
+    mask = jnp.ones_like(counts, dtype=bool) 
 
     @jit
     def _step(params, _):
