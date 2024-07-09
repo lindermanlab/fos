@@ -134,6 +134,12 @@ def run_sweep(data_dir,
     # Extract the full factors
     factors = jnp.zeros((num_factors, num_alive_voxels))
     factors = factors.at[:, train_alive_voxels].set(params.factors)
+    count_col_effects = jnp.zeros(num_alive_voxels)
+    count_col_effects = count_col_effects.at[train_alive_voxels].set(params.count_col_effects)
+    intensity_col_effects = jnp.zeros(num_alive_voxels)
+    intensity_col_effects = intensity_col_effects.at[train_alive_voxels].set(params.intensity_col_effects)
+    intensity_variance = jnp.ones(num_alive_voxels)
+    intensity_variance = intensity_variance.at[train_alive_voxels].set(params.intensity_variance)
 
     # Save the results for this bootstrap
     print("saving results")
@@ -143,11 +149,11 @@ def run_sweep(data_dir,
                          factors=factors,
                          count_loadings=params.count_loadings, 
                          count_row_effects=params.count_row_effects,
-                         count_col_effecs=params.count_col_effects,
+                         count_col_effects=count_col_effects,
                          intensity_loadings=params.intensity_loadings,
                          intensity_row_effects=params.intensity_row_effects,
-                         intensity_col_effecs=params.intensity_col_effects,
-                         intensity_variance=params.intensity_variance,
+                         intensity_col_effects=intensity_col_effects,
+                         intensity_variance=intensity_variance,
                          ),
                     f)
 
